@@ -18,12 +18,18 @@ const view = {
   ym: { y: new Date().getFullYear(), m: new Date().getMonth() },
   dayDetail: null,
   habitForm: null,
+  manage: false,
+  confirmDelete: null,
 };
 
 let formName = '';
 let formIcon = EMOJIS[0];
 let formColor = PALETTE[0];
 let toastTimer = null;
+let lastStamp = null; // { key, id } 最近一次盖章的位置,用于播放盖章动画
+let swipeOpenId = null; // 当前左滑展开的习惯行 id
+let swipeDrag = null;   // 正在进行的滑动手势
+const SWIPE_W = 130;    // 操作层宽度,需与 CSS 中 .entry-actions 一致
 
 /* ==================== 工具函数 ==================== */
 const $ = (sel) => document.querySelector(sel);
@@ -88,8 +94,14 @@ function setDone(key, hid, on) {
   if (on && i === -1) arr.push(hid);
   if (!on && i !== -1) arr.splice(i, 1);
   if (arr.length === 0) delete state.records[key];
+  lastStamp = { key, id: hid };
+  swipeOpenId = null;
   saveState();
   render();
+}
+
+function isJustStamped(key, hid) {
+  return !!lastStamp && lastStamp.key === key && lastStamp.id === hid;
 }
 
 function getHabit(id) { return state.habits.find((h) => h.id === id); }
@@ -110,6 +122,7 @@ function removeHabit(id) {
     state.records[k] = state.records[k].filter((x) => x !== id);
     if (state.records[k].length === 0) delete state.records[k];
   }
+  swipeOpenId = null;
   saveState();
 }
 
@@ -200,64 +213,91 @@ function renderToday() {
   const key = todayKey();
   const { done, total, pct } = dayProgress(key);
   const d = new Date();
-  const C = 2 * Math.PI * 52;
 
-  let habitsHtml;
+  let stripHtml = '';
+  let rowsHtml;
+
   if (state.habits.length === 0) {
-    habitsHtml = `
+    rowsHtml = `
       <div class="empty">
         <span class="empty-emoji">🌱</span>
         还没有习惯,先添加一个吧
       </div>`;
   } else {
-    habitsHtml = state.habits.map((h) => {
+    stripHtml = state.habits.map((h) => {
+      const on = isDone(key, h.id);
+      const just = isJustStamped(key, h.id) ? ' just' : '';
+      return `
+        <button class="stamp-cell ${on ? 'done' : ''}${just}" data-action="toggle" data-id="${h.id}" data-date="${key}"
+          aria-label="${on ? '取消' : '完成'}「${esc(h.name)}」" title="${esc(h.name)}">
+          <span class="cell-emoji">${esc(h.icon)}</span>
+          <span class="stamp-mark">✓</span>
+        </button>`;
+    }).join('');
+
+    rowsHtml = state.habits.map((h) => {
       const on = isDone(key, h.id);
       const streak = habitStreak(h.id);
-      const streakText = streak > 0 ? '🔥 连续 ' + streak + ' 天' : '今天还没开始';
+      const just = isJustStamped(key, h.id) ? ' just' : '';
+      const open = h.id === swipeOpenId ? ' open' : '';
+      const streakText = streak > 0 ? '连续 ' + streak + ' 天' : '今天还没开始';
       return `
-        <div class="habit-row">
-          <button class="habit-main" data-action="edit-habit" data-id="${h.id}" title="编辑习惯">
-            <span class="habit-icon" style="background:${h.color}1a;color:${h.color}">${esc(h.icon)}</span>
-            <span class="habit-info">
-              <span class="habit-name">${esc(h.name)}</span>
-              <span class="habit-streak">${streakText}</span>
-            </span>
-          </button>
-          <button class="check ${on ? 'on' : ''}" data-action="toggle" data-id="${h.id}" data-date="${key}"
-            style="${on ? `background:${h.color};border-color:${h.color}` : ''}" aria-label="${on ? '取消完成' : '标记完成'}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.2 4.2L19 7.5"/></svg>
-          </button>
+        <div class="entry-wrap" data-id="${h.id}">
+          <div class="entry-actions">
+            <button class="action-btn action-edit" data-action="edit-habit" data-id="${h.id}">编辑</button>
+            <button class="action-btn action-delete" data-action="delete-habit" data-id="${h.id}">删除</button>
+          </div>
+          <div class="entry-row${open}" data-id="${h.id}">
+            <button class="entry-main" data-action="edit-habit" data-id="${h.id}" title="编辑习惯">
+              <span class="entry-icon">${esc(h.icon)}</span>
+              <span class="entry-info">
+                <span class="entry-name">${esc(h.name)}</span>
+                <span class="entry-streak">${streakText}</span>
+              </span>
+            </button>
+            <button class="stamp ${on ? 'on' : ''}${just}" data-action="toggle" data-id="${h.id}" data-date="${key}"
+              aria-label="${on ? '取消完成' : '标记完成'}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.2 4.2L19 7.5"/></svg>
+            </button>
+          </div>
         </div>`;
     }).join('');
   }
 
+  let desc;
+  if (total === 0) {
+    desc = '添加习惯,开始打卡吧';
+  } else if (pct === 1) {
+    desc = '今天全部完成,盖章收工 🎉';
+  } else if (done === 0) {
+    desc = '今天还没盖章,开始吧';
+  } else {
+    desc = `已完成 <b>${done}</b> / <b>${total}</b> 项,还差 ${total - done} 项`;
+  }
+
   wrap.innerHTML = `
     <div class="hero">
-      <div class="hero-ring">
-        <svg class="ring" viewBox="0 0 120 120">
-          <circle class="ring-bg" cx="60" cy="60" r="52"/>
-          <circle class="ring-fg" cx="60" cy="60" r="52" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C * (1 - pct)).toFixed(1)}"/>
-          <text x="60" y="61" class="ring-num">${done}</text>
-          <text x="60" y="80" class="ring-sub">/ ${total} 项</text>
-        </svg>
-      </div>
       <div class="hero-text">
-        <h2>${d.getMonth() + 1}月${d.getDate()}日<span>星期${'日一二三四五六'[d.getDay()]}</span></h2>
-        <p class="hero-desc">${
-          total === 0
-            ? '添加习惯,开始打卡吧 ✨'
-            : pct === 1
-              ? '太棒了,今天全部完成!🎉'
-              : done === 0
-                ? '今天还没有打卡,加油!'
-                : `已完成 ${done}/${total},还差 ${total - done} 项`
-        }</p>
+        <p class="kicker">星期${'日一二三四五六'[d.getDay()]} · 今日打卡</p>
+        <h1 class="display">${d.getMonth() + 1}月${d.getDate()}日</h1>
+        <p class="hero-desc">${desc}</p>
       </div>
+      ${stripHtml ? `<div class="stamp-strip">${stripHtml}</div>` : ''}
     </div>
-    <div class="card list-card">${habitsHtml}</div>
-    <div class="card add-card">
-      <input id="new-habit-name" placeholder="想坚持什么?比如 早睡、拉伸…" maxlength="12" autocomplete="off">
-      <button class="btn primary" data-action="open-new">＋ 添加习惯</button>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span class="sheet-title">今日清单</span>
+        <span class="sheet-tools">
+          <span class="sheet-hint">左滑行可操作</span>
+          <button class="link-btn" data-action="open-manage">管理习惯</button>
+        </span>
+      </div>
+      ${rowsHtml}
+      <div class="add-line">
+        <span class="add-plus">＋</span>
+        <input id="new-habit-name" placeholder="写下下一个想坚持的习惯…" maxlength="12" autocomplete="off">
+        <button class="btn primary" data-action="open-new">添加</button>
+      </div>
     </div>`;
 
   const quick = $('#new-habit-name');
@@ -266,6 +306,10 @@ function renderToday() {
       if (e.key === 'Enter') openHabitForm('new');
     });
   }
+  document.querySelectorAll('.entry-wrap').forEach((wrap) => {
+    attachSwipe(wrap.querySelector('.entry-row'));
+  });
+  lastStamp = null;
 }
 
 function renderMonth() {
@@ -277,21 +321,22 @@ function renderMonth() {
     return `
       <button class="cal-cell ${inMonth ? '' : 'muted'} ${today ? 'today' : ''}" data-action="open-day" data-date="${key}">
         <span class="cal-num">${d.getDate()}</span>
-        ${total > 0 ? `
-          <span class="cal-frac">${done}/${total}</span>
-          <span class="cal-bar"><i style="width:${(pct * 100).toFixed(0)}%"></i></span>` : ''}
+        ${total > 0 ? `<span class="cal-meta">${done}/${total}</span>` : ''}
+        ${done > 0 ? `<span class="cal-seal ${pct >= 1 ? 'full' : ''}"></span>` : ''}
       </button>`;
   }).join('');
 
   wrap.innerHTML = `
-    <div class="cal-nav">
-      <button class="icon-btn" data-action="prev-month" title="上个月">‹</button>
-      <h2 class="cal-title">${y}年 ${m + 1}月</h2>
-      <button class="icon-btn" data-action="next-month" title="下个月">›</button>
-      <button class="btn ghost" data-action="goto-today">今天</button>
-    </div>
-    <div class="cal-dow">${WEEK_LABELS.map((w) => `<span>${w}</span>`).join('')}</div>
-    <div class="cal-grid">${cells}</div>`;
+    <div class="cal-shell">
+      <div class="cal-nav">
+        <button class="icon-btn" data-action="prev-month" title="上个月">‹</button>
+        <h2 class="cal-title">${y}年 ${m + 1}月</h2>
+        <button class="icon-btn" data-action="next-month" title="下个月">›</button>
+        <button class="btn ghost" data-action="goto-today">今天</button>
+      </div>
+      <div class="cal-dow">${WEEK_LABELS.map((w) => `<span>${w}</span>`).join('')}</div>
+      <div class="cal-grid">${cells}</div>
+    </div>`;
 }
 
 function renderYear() {
@@ -301,8 +346,8 @@ function renderYear() {
     const rate = monthRate(y, m);
     const squares = monthDates(y, m).map(({ key, inMonth }) => {
       const { pct } = dayProgress(key);
-      const a = 0.06 + pct * 0.8;
-      return `<i class="sq ${inMonth ? '' : 'out'}" style="background:rgba(124,108,240,${a.toFixed(2)})"></i>`;
+      const a = 0.05 + pct * 0.85;
+      return `<i class="sq ${inMonth ? '' : 'out'}" style="background:rgba(213,76,50,${a.toFixed(2)})"></i>`;
     }).join('');
     return `
       <button class="year-card" data-action="goto-month" data-y="${y}" data-m="${m}">
@@ -340,9 +385,16 @@ function renderModal() {
     renderDayModal(body);
   } else if (view.habitForm) {
     renderHabitFormModal(body);
+  } else if (view.manage) {
+    renderManageModal(body);
+  } else if (view.confirmDelete) {
+    renderConfirmModal(body);
   }
 
-  root.classList.toggle('hidden', !view.dayDetail && !view.habitForm);
+  root.classList.toggle(
+    'hidden',
+    !view.dayDetail && !view.habitForm && !view.manage && !view.confirmDelete
+  );
 }
 
 function renderDayModal(body) {
@@ -352,11 +404,11 @@ function renderDayModal(body) {
     const on = isDone(view.dayDetail, h.id);
     return `
       <div class="day-row">
-        <span class="day-icon" style="background:${h.color}1a">${esc(h.icon)}</span>
+        <span class="day-icon">${esc(h.icon)}</span>
         <span class="day-name">${esc(h.name)}</span>
-        <button class="check ${on ? 'on' : ''}" data-action="toggle" data-id="${h.id}" data-date="${view.dayDetail}"
-          style="${on ? `background:${h.color};border-color:${h.color}` : ''}" aria-label="${on ? '取消完成' : '标记完成'}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.2 4.2L19 7.5"/></svg>
+        <button class="stamp ${on ? 'on' : ''}" data-action="toggle" data-id="${h.id}" data-date="${view.dayDetail}"
+          aria-label="${on ? '取消完成' : '标记完成'}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.2 4.2L19 7.5"/></svg>
         </button>
       </div>`;
   }).join('');
@@ -379,10 +431,6 @@ function renderHabitFormModal(body) {
   const emojiHtml = EMOJIS.map((e) => `
     <button class="emoji-opt ${e === formIcon ? 'sel' : ''}" data-action="pick-emoji" data-emoji="${e}">${e}</button>
   `).join('');
-  const colorHtml = PALETTE.map((c) => `
-    <button class="color-opt ${c === formColor ? 'sel' : ''}" data-action="pick-color" data-color="${c}"
-      style="background:${c};color:${c}" aria-label="颜色"></button>
-  `).join('');
 
   body.innerHTML = `
     <div class="modal-head">
@@ -395,9 +443,6 @@ function renderHabitFormModal(body) {
 
       <label class="field-label">图标</label>
       <div class="emoji-row">${emojiHtml}</div>
-
-      <label class="field-label">颜色</label>
-      <div class="color-row">${colorHtml}</div>
 
       <div class="form-actions">
         ${editing ? '<button class="btn danger" data-action="delete-habit" data-id="' + view.habitForm + '">删除</button>' : ''}
@@ -417,13 +462,136 @@ function renderHabitFormModal(body) {
   }
 }
 
+function renderManageModal(body) {
+  const rows = state.habits.length
+    ? state.habits.map((h) => {
+        const streak = habitStreak(h.id);
+        return `
+          <div class="manage-row">
+            <span class="manage-icon">${esc(h.icon)}</span>
+            <span class="manage-info">
+              <span class="manage-name">${esc(h.name)}</span>
+              <span class="manage-streak">${streak > 0 ? '连续 ' + streak + ' 天' : '暂未开始'}</span>
+            </span>
+            <button class="btn ghost" data-action="edit-habit" data-id="${h.id}">编辑</button>
+            <button class="btn danger" data-action="delete-habit" data-id="${h.id}">删除</button>
+          </div>`;
+      }).join('')
+    : '<div class="empty"><span class="empty-emoji">🌱</span>还没有习惯,先添加一个吧</div>';
+
+  body.innerHTML = `
+    <div class="modal-head">
+      <h3 style="flex:1">管理习惯</h3>
+      <button class="icon-btn close" data-action="close-modal" title="关闭">×</button>
+    </div>
+    <div class="manage-list">${rows}</div>`;
+}
+
+function renderConfirmModal(body) {
+  const h = getHabit(view.confirmDelete);
+  body.innerHTML = `
+    <div class="modal-head">
+      <h3 style="flex:1">删除习惯</h3>
+      <button class="icon-btn close" data-action="close-modal" title="关闭">×</button>
+    </div>
+    <div class="confirm-body">
+      <p class="confirm-text">确定删除「${h ? esc(h.name) : '这个习惯'}」吗?</p>
+      <p class="confirm-sub">该习惯的历史打卡记录也会一并删除,删除后无法恢复。</p>
+      <div class="form-actions">
+        <button class="btn ghost" data-action="close-modal">取消</button>
+        <button class="btn danger" data-action="confirm-delete" data-id="${view.confirmDelete}">确认删除</button>
+      </div>
+    </div>`;
+}
+
 /* ==================== 交互 ==================== */
+function attachSwipe(row) {
+  if (!row) return;
+
+  row.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    row._suppressClick = false;
+    swipeDrag = {
+      id: row.dataset.id,
+      startX: e.clientX,
+      startY: e.clientY,
+      open: row.classList.contains('open'),
+      moved: false,
+      dx: 0,
+      dy: 0,
+    };
+  });
+
+  row.addEventListener('pointermove', (e) => {
+    const d = swipeDrag;
+    if (!d || d.id !== row.dataset.id) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    d.dx = dx;
+    d.dy = dy;
+    if (!d.moved && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) d.moved = true;
+    if (!d.moved) return;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      row.style.transition = 'none';
+      const x = Math.min(0, Math.max(-SWIPE_W, (d.open ? -SWIPE_W : 0) + dx));
+      row.style.transform = 'translateX(' + x + 'px)';
+    }
+  });
+
+  const endSwipe = (e) => {
+    const d = swipeDrag;
+    if (!d || d.id !== row.dataset.id) return;
+    row.style.transition = '';
+    row.style.transform = '';
+    if (!d.moved) {
+      if (d.open) {
+        // 轻点已展开的行:如果是印章按钮,允许它继续盖章;其余情况只收起、不触发点击
+        const onStamp = e.target && e.target.closest && e.target.closest('.stamp');
+        if (!onStamp) row._suppressClick = true;
+        closeSwipe();
+      }
+    } else if (Math.abs(d.dx) > Math.abs(d.dy)) {
+      row._suppressClick = true;
+      if (d.dx < -SWIPE_W * 0.3) openSwipe(row.dataset.id);
+      else closeSwipe();
+    }
+    swipeDrag = null;
+  };
+
+  row.addEventListener('pointerup', endSwipe);
+  row.addEventListener('pointercancel', endSwipe);
+
+  // 拦截滑动/轻点收起后浏览器补发的 click,避免误触编辑或盖章
+  row.addEventListener('click', (e) => {
+    if (row._suppressClick) {
+      e.preventDefault();
+      e.stopPropagation();
+      row._suppressClick = false;
+    }
+  }, true);
+}
+
+function openSwipe(id) {
+  closeSwipe();
+  swipeOpenId = id;
+  const row = document.querySelector('.entry-row[data-id="' + id + '"]');
+  if (row) row.classList.add('open');
+}
+
+function closeSwipe() {
+  if (!swipeOpenId) return;
+  const row = document.querySelector('.entry-row[data-id="' + swipeOpenId + '"]');
+  if (row) row.classList.remove('open');
+  swipeOpenId = null;
+}
+
 function setTab(mode) {
   view.mode = mode;
   switchView();
 }
 
 function openHabitForm(id) {
+  swipeOpenId = null;
   view.habitForm = id;
   if (id === 'new') {
     const quick = $('#new-habit-name');
@@ -444,6 +612,8 @@ function openHabitForm(id) {
 function closeModal() {
   view.dayDetail = null;
   view.habitForm = null;
+  view.manage = false;
+  view.confirmDelete = null;
   render();
 }
 
@@ -459,7 +629,7 @@ function saveHabitForm() {
     addHabit(name, formIcon, formColor);
     showToast('已添加「' + name + '」✓');
   } else {
-    updateHabit(view.habitForm, { name, icon: formIcon, color: formColor });
+    updateHabit(view.habitForm, { name, icon: formIcon });
     showToast('已保存 ✓');
   }
   closeModal();
@@ -468,11 +638,21 @@ function saveHabitForm() {
 function deleteHabitFlow(id) {
   const h = getHabit(id);
   if (!h) return;
-  if (confirm('确定删除「' + h.name + '」吗?它的历史打卡记录也会一并删除。')) {
-    removeHabit(id);
-    closeModal();
-    showToast('已删除「' + h.name + '」');
-  }
+  swipeOpenId = null;
+  view.dayDetail = null;
+  view.habitForm = null;
+  view.manage = false;
+  view.confirmDelete = id;
+  render();
+}
+
+function confirmDeleteHabit() {
+  const id = view.confirmDelete;
+  if (!id) return;
+  const h = getHabit(id);
+  removeHabit(id);
+  closeModal();
+  if (h) showToast('已删除「' + h.name + '」');
 }
 
 function shiftMonth(dir) {
@@ -512,6 +692,10 @@ document.addEventListener('click', (e) => {
   if (e.target === $('#modal-root')) {
     closeModal();
     return;
+  }
+  if (swipeOpenId) {
+    const openWrap = e.target.closest ? e.target.closest('.entry-wrap[data-id="' + swipeOpenId + '"]') : null;
+    if (!openWrap) closeSwipe();
   }
   const el = e.target.closest('[data-action]');
   if (!el) return;
@@ -567,6 +751,10 @@ document.addEventListener('click', (e) => {
     case 'edit-habit':
       openHabitForm(id);
       break;
+    case 'open-manage':
+      view.manage = true;
+      render();
+      break;
     case 'pick-emoji':
       formIcon = el.dataset.emoji;
       render();
@@ -580,6 +768,9 @@ document.addEventListener('click', (e) => {
       break;
     case 'delete-habit':
       deleteHabitFlow(id);
+      break;
+    case 'confirm-delete':
+      confirmDeleteHabit();
       break;
     case 'close-modal':
       closeModal();
